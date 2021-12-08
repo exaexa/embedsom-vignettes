@@ -1,0 +1,171 @@
+---
+title: EmbedSOM on single-cell data
+author: Miroslav Kratochvíl, Abhishek Koladiya
+email: exa.exa@gmail.com and Abhishek.Koladiya@uhkt.cz
+date: 2019/12/28
+output: rmarkdown::html_vignette
+---
+
+```{r setup, include=FALSE}
+library(rgl)
+knitr::opts_chunk$set(fig.align="center", fig.height=6, fig.width=7) 
+knitr::knit_hooks$set(webgl = hook_webgl)
+```
+
+This vignette gives a rough overview of using EmbedSOM for actual cytometry data; in this case on a bone marrow dataset from Bendall et al., available at [Flowrepository-FR-FCM-ZY9R](https://flowrepository.org/id/FR-FCM-ZY9R). We show how to get data into embedding, and how to choose different landmark-generating functions to highlight different aspects of data.
+
+After you download the FCS file from the FlowRepository link above, you can read it as such:
+
+```{r}
+data <- flowCore::read.FCS("Bone_Marrow_cytof.fcs")
+```
+
+After that, we simplify it a bit by converting it to a matrix, transform it, and see how much cells and parameters there is:
+
+```{r}
+data <- asinh(0.2 * data@exprs)
+print(dim(data))
+```
+
+# Running EmbedSOM
+
+First, you need to run the SOM algorithm to obtain a "map" of the cellular space:
+
+```{r}
+set.seed(1)
+time <- system.time(
+map <- EmbedSOM::SOM(data, xdim=32, ydim=32, batch=T, parallel=T, rlen=20)
+)
+```
+
+The parameters set the SOM size (20 times 20 is usually enough, but let's see some detail), choose the parallelizable batch-SOM training, and add a bit of extra epochs above the default 10 (which is recommended if training larger SOMs). We also measured the required time, which is, in seconds:
+
+```{r}
+print(time[3])
+```
+
+After we have the map, we can project the cells onto that:
+
+```{r}
+time <- system.time(
+e <- EmbedSOM::EmbedSOM(data=data, map=map, parallel=T)
+)
+print(time[3])
+```
+
+`e` is now a 2-column matrix with coordinates of individual cells. You may as well plot it manually:
+
+```{r}
+plot(e, pch='.', col=rgb(0,0,0,0.2))
+```
+
+EmbedSOM provides its own function to ease various cell-plotting tasks, named (expectably) `PlotEmbed`. By default, it plots density:
+
+```{r}
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e)
+```
+
+Plotting of various cell-related data is supported, including the marker expressions (e.g. the CD19 here, to identify the B cells):
+
+```{r}
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, data=data, 'CD19', alpha=.4)
+```
+
+We will mix a slightly more comprehensive coloring of the cells to use later:
+
+```{r}
+cellColor <- EmbedSOM::ExprColors(data[,c('CD19', 'CD4', 'CD8', 'CD34', 'CD33')], col=RColorBrewer::brewer.pal(5, 'Set1'), pow=4, alpha=1)
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, col=adjustcolor(cellColor, alpha=.4))
+```
+
+In the result, B cells are (roughly) red, CD4+ T cells are blue, CD8+ T cells are green, CD34+ cells (including stem cells) are violet-ish, and CD33+ cells (including the monocytes) are orange.
+
+The map from SOMs has many other purposes. For example it can be used for clustering the data with great success, as done by FlowSOM. Here, we simulate the process by hand, and use the `clust` parameter of `PlotEmbed` to plot the clustering:
+
+```{r}
+cl <- cutree(k=20, hclust(dist(map$codes), method='average'))[map$mapping[,1]]
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, clust=cl, alpha=.4)
+```
+
+The clusters apparently match the major cell populations, and could eventually be used for dissecting and analysing the content of the dataset just as with FlowSOM). Still, this vignette follows a different story, and we only keep the clusters for future color-coded reference.
+
+# Other ways of embedding
+
+The embedding process can be tuned in many different ways. Most notably, you can use different landmark models to plot the data in better ways.
+
+Let us first try the modified SOM algorithm GQTSOM that aims to provide better-structured landmarks for the embedding:
+
+```{r, fig.width=7, fig.height=3.5}
+set.seed(1)
+map <- EmbedSOM::GQTSOM(data, target_codes=1000, radius=c(10,.1), rlen=15, parallel=T)
+e <- EmbedSOM::EmbedSOM(data=data, map=map, parallel=T)
+
+# plotting
+par(mar=rep(0,4), mfrow=c(1,2))
+EmbedSOM::PlotEmbed(e, clust=cl, alpha=.25)
+EmbedSOM::PlotEmbed(e, col=adjustcolor(cellColor, alpha=.25))
+```
+
+The main difference from normal SOMs is the shape of the underlying SOM, which adapts to better capture details. This is the best visualisation of the resulting SOM shape that we were able to invent so far:
+
+```{r}
+par(mar=rep(0,4))
+plot(map$grid, pch=19,
+  col=EmbedSOM::ExprColors(map$codes[,c('CD19', 'CD4', 'CD8', 'CD34', 'CD33')],
+                           col=RColorBrewer::brewer.pal(5, 'Set1'), pow=4),
+  cex=20*.5^map$coords[,1])
+```
+
+If you need a funkier visualization, you can use a cheap trick of getting landmarks organized by some advanced DR algorithm, and just use them as a guide for projecting rest of the cells. The functionality can be demonstrated e.g. with tSNE:
+
+```{r, fig.width=7, fig.height=2.3}
+set.seed(1)
+map <- EmbedSOM::RandomMap(data, 1000, coords=EmbedSOM::tSNECoords())
+e <- EmbedSOM::EmbedSOM(data=data, map=map, parallel=T)
+
+# plotting
+par(mar=rep(0,4), mfrow=c(1,3))
+EmbedSOM::PlotEmbed(e, clust=cl, alpha=.1)
+EmbedSOM::PlotEmbed(e, col=adjustcolor(cellColor, alpha=.1))
+plot(map$grid, pch=19, xaxt='n', yaxt='n',
+  col=EmbedSOM::ExprColors(map$codes[,c('CD19', 'CD4', 'CD8', 'CD34', 'CD33')],
+                           col=RColorBrewer::brewer.pal(5, 'Set1'), pow=2))
+```
+
+The figures show expression-colored and cluster-colored cells, and the tSNE organization of the selected landmarks (again colored by expression).
+
+tSNE-guided embedding does not carry any underlying information which could be used for clustering, but it gives a visual advantage of added headroom between the cell clusters. Although interesting cluster details may get squished (or lost), this nicely shows various intermediate cell states.
+
+Note that despite tSNE is relatively slow, it is only used to embed the 1000 landmarks, which takes just around 2 seconds (on a recent laptop). Together with the EmbedSOM projection, the times add to just under 10 seconds.
+
+# 3D
+
+Although 3D pictures can not be printed and complete spatial orientation causes serious trouble to most of human beings, 3D is just cool to omit, and we should be able to produce 3D pictures. (Moreover, 3D offers one extra dimension that may help to solve various DR-induced data conflicts that can not be solved in 2D.)
+
+With EmbedSOM, you only need to supply 3D landmark projections from whatever algorithm that can do it. In case of SOMs, `zdim` parameter adds the third dimension to the SOM grid, and, in turn, produces the 3D embedding.
+
+We found that 3D EmbedSOM looks subjectively best with UMAP-guided landmarks. Likely because UMAP puts quite a bit of pressure into squishing the clusters, thus creating even more headroom than tSNE, and, consequently, reducing the amount of "fog" that obscures the 3D view. Here we use `uwot` package to organize the landmarks in 3D, and extrapolate 3D coordinates of all cells:
+```{r}
+set.seed(1)
+e <- EmbedSOM::EmbedSOM(
+  data=data,
+  map=EmbedSOM::RandomMap(
+    data,
+    1000,
+    coords=EmbedSOM::uwotCoords(dim=3, min_dist=1)),
+  parallel=T)
+
+head(e)
+```
+
+Plotting of 3D points is slightly more complicated (`PlotEmbed` function only works for 2D data). WebGL-supporting browsers should be able to display this interactive plot from `rgl`:
+
+```{r, testgl, webgl=TRUE}
+rgl::points3d(e, col=cellColor, size=1)
+```
+
+(Drag the mouse to rotate the plot, wheel to zoom.)

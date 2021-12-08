@@ -1,0 +1,197 @@
+---
+title: EmbedSOM vs. mESC cell differentiation in time
+author: Miroslav Kratochvíl, Abhishek Koladiya
+email: exa.exa@gmail.com, Abhishek.Koladiya@uhkt.cz
+date: 2020-01-18
+output: rmarkdown::html_vignette
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align="center", fig.height=6, fig.width=7, cache.extra = knitr::rand_seed)
+```
+
+Authors of FLOWMAP have used a nice dataset of differentiating stem cells that is nice for showing how to embed pseudotime.
+
+The article that describes the dataset and experiment has been published in [Nature Protocols](https://www.nature.com/articles/s41596-019-0246-3): *Ko, M.E., Williams, C.M., Fread, K.I. et al. FLOW-MAP: a graph-based, force-directed layout algorithm for trajectory mapping in single-cell time course datasets. Nat Protoc (2020) doi:10.1038/s41596-019-0246-3*.
+
+The data (FCS files) can be downloaded from CytoBank: https://community.cytobank.org/cytobank/experiments/71953 .
+
+Here, we mainly aim to reproduce the FLOWMAP visualization as seen in **Figure 6a** in the article, without downsampling, and in a fraction of original reported time (the authors report tens of minutes).
+
+# Preparing data
+
+Let's first aggregate the data set and extract some useful information for later plotting (mainly sample type and the timestamps). Assuming the data reside in current directory, we can load them using FlowSOM:
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, results=FALSE, comment=FALSE}
+set.seed(1)
+files <- dir(pattern='.*\\.fcs')
+
+ff <- FlowSOM::AggregateFlowFrames(files, cTotal=1000000)
+```
+(We have suppressed several warnings that report breakage in CytoBank-originating FCS files.)
+
+Extract times and sample categories:
+```{r}
+filesTime <- as.numeric(sapply(files, function(x) {l <- nchar(x); substr(x, start=7, stop=l-4)}))
+filesSample <- unname(factor(sapply(files, function(x) substr(x,1,2))))
+cellFile <- ff@exprs[,'File']
+```
+
+Pick out interesting parameters and transform the data:
+```{r}
+d <- asinh(0.2 * ff@exprs[,c(11:13,15,17:20,22:26,28:30,32:42)])
+print(dim(d)) #see how large the data is
+```
+
+Make a scrambling vector (used later to avoid the overplotting artifacts):
+```{r}
+scramble <- sample(nrow(d),nrow(d))
+```
+
+Finally, the pseudotime. The original range is roughly from 0 to 11 (in days), we add a bit of normal "smudge" to avoid accumulation of data at discrete points.
+```{r}
+dtime <- cbind(d, filesTime[cellFile]+rnorm(nrow(d)))
+colnames(dtime)[ncol(dtime)] <- "Time"
+dtime[,'Time'] <- 3*scale(dtime[,'Time'])
+```
+
+# Embedding with normal EmbedSOM
+
+Let's see how the data look through a self-organizing map (SOM). This may be interesting if you wanted to cluster the data later. Propertiess of SOM-based embedding make it extremely easy to see all populations, but not very simple for a human to observe any trajectories in the data (especially if the data has not been extensively cleaned).
+
+We can construct the SOM and run the embedding right on it:
+
+```{r}
+set.seed(1)
+time <- system.time(
+  e <- EmbedSOM::EmbedSOM(
+         data=dtime,
+         map=EmbedSOM::SOM(
+           dtime,
+           xdim=24, ydim=24, rlen=20,
+           batch=T, parallel=T), 
+         parallel=T)
+)
+print(time[3])
+```
+
+We can reproduce the rainbow-like coloring used in FLOWMAPR with help of `colorspace` package:
+
+```{r}
+timeColor <- function(n, alpha=1)
+  colorspace::rainbow_hcl(n=n, alpha=alpha, start=10, end=330, c=250, l=60)
+```
+
+The time-development plot then looks as such (notice the scrambling):
+```{r}
+plotPseudotime <- function(e) {
+  par(mar=rep(0,4))
+  EmbedSOM::PlotEmbed(
+    e[scramble,],
+    data=dtime[scramble,],
+    alpha=.1, expression.colors=timeColor,
+    'Time')
+  legend('topleft',
+    legend=rep('',13), col=timeColor(13),
+    pch=15, pt.cex=2, cex=.6,
+    title="Time progress", horiz=T)
+}
+
+plotPseudotime(e)
+```
+
+The sample-origin plot can be done in a similar way:
+
+```{r}
+plotOrigin <- function(e) {
+  par(mar=rep(0,4))
+  EmbedSOM::PlotEmbed(
+    e[scramble,],
+    alpha=.1, cluster.colors=colorspace::qualitative_hcl,
+    clust=filesSample[cellFile[scramble]])
+  legend('topleft',
+    c(AE="endoderm", `B4`="mesoderm", `N2`="ectoderm")[levels(filesSample)],
+    col=colorspace::qualitative_hcl(nlevels(filesSample)),
+    pch=15, pt.cex=2, cex=.6,
+    title="Sample group", horiz=T)
+}
+
+plotOrigin(e)
+```
+
+Finally, let's explore the actual marker expressions:
+
+```{r, fig.width=7, fig.height=4}
+plotMarkers <- function(e, alpha=0.0075) {
+  par(mar=rep(0,4), mfrow=c(4,7))
+  EmbedSOM::PlotEmbed(e, data=d, alpha=.2, plotf=scattermore::scattermoreplot)
+  mtext('Density', side=3, line=-1, adj=0.05, cex=.7)
+  for(i in colnames(d)) {
+        EmbedSOM::PlotEmbed(e, data=d, alpha=alpha, i, plotf=scattermore::scattermoreplot)
+        mtext(unlist(strsplit(i,split='\\('))[1], side=3, line=-1, adj=0.05, cex=.7)
+  }
+}
+
+plotMarkers(e)
+```
+
+(The plotting uses the `scattermore` package to provide slightly better low-alpha blending, and much more bearable plotting speed.)
+
+# Embedding with tSNE-guided EmbedSOM
+
+Using randomly chosen points instead of SOMs does not add much to the robustness of the study, but it is fast and the points can be embedded using any DR algorithm, even one that would be very slow on the actual data size. In this case, we use tSNE:
+
+```{r}
+set.seed(1)
+time <- system.time(
+  e <- EmbedSOM::EmbedSOM(
+         data=dtime,
+         map=EmbedSOM::RandomMap(dtime,
+                                 1000,
+                                 coordsFn=EmbedSOM::tSNECoords()),
+         parallel=T))
+print(time[3])
+```
+
+tSNE is, by design, much more suitable for visualizing stuff than SOMs (which are better for cutting and analyzing it). Most importantly, it adds a bit of breathing space between the clusters, nicely showing the pathways:
+```{r}
+plotPseudotime(e)
+```
+
+Same for sample origins:
+```{r}
+plotOrigin(e)
+```
+
+And same for the markers:
+```{r, fig.width=7, fig.height=4}
+plotMarkers(e, 0.005)
+```
+
+# Embedding with k-NN topology
+Finally, EmbedSOM offers more methods to generate map-like landmarks from datasets, and others to find good projections of the landmarks to 2D. For demonstration, we show that a simple k-means clustering works pretty well for choosing landmarks, and that kNN-driven layouting of the landmarks to 2D works pretty well to reconstruct the multidimensional manifold.
+```{r}
+set.seed(1)
+time <- system.time(
+  e <- EmbedSOM::EmbedSOM(
+         data=dtime,
+         map=EmbedSOM::kMeansMap(dtime, 300,
+           rlen=3, parallel=T,
+           coordsFn=EmbedSOM::kNNCoords(5)),
+         parallel=T))
+print(time[3])
+```
+
+The resulting layout puts emphasis on slightly different properties of the dataset, but the main clusters and their relations are still recognizable:
+
+```{r}
+plotPseudotime(e)
+```
+
+```{r}
+plotOrigin(e)
+```
+
+```{r, fig.width=7, fig.height=4}
+plotMarkers(e, 0.005)
+```

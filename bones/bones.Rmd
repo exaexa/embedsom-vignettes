@@ -1,0 +1,102 @@
+---
+title: EmbedSOM vs. archeology
+author: Miroslav Kratochvíl
+email: exa.exa@gmail.com
+date: 2020-01-18
+output: rmarkdown::html_vignette
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align="center", fig.height=6, fig.width=7, cache.extra = knitr::rand_seed)
+```
+
+Smithsonian Institute provides a whole load of interesting data, among them a 3D model of a [woolly mammoth skeleton](https://3d.si.edu/explorer/woolly-mammoth) and of a [T-rex skeleton eating triceratops skeleton](https://3d.si.edu/t-rex)!
+
+In this vignette, we convert them to flat versions.
+
+# Getting the data
+
+The data is available as STL models. You should be able to get a list of 3D point coordinates from the STL either directly, or using some of the available commandline tools (e.g. `stl2gts`). At the end, you should end up having a 3-column matrix of point coordinates. I saved them to `mammoth.points` and `trex.points` and loaded them accordingly. The models have hundreds of thousands of individual points!
+
+```{r}
+mammoth <- read.table('mammoth.points', header=F)
+trex <- read.table('trex.points', header=F)
+print(dim(mammoth))
+print(dim(trex))
+```
+
+The data is organized as expected:
+
+```{r}
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(mammoth[,c(2,3)])
+```
+```{r}
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(-trex[,c(1,2)])
+```
+
+# A flat woolly mammoth
+
+We may embed the mammoth using the "standard" approach. I use an extra large grid to get extra detail, but smaller grids usually suffice (and may compute much faster).
+
+```{r}
+set.seed(1)
+print(system.time(
+e <- EmbedSOM::EmbedSOM(mammoth, parallel=T,
+       map=EmbedSOM::SOM(mammoth, xdim=32, ydim=32, parallel=T, batch=T))
+)[3])
+```
+
+Let us color the mammoth components by color, so that we see which leg belongs where:
+
+```{r}
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, data=mammoth, red=1, green=2, blue=3, alpha=.1)
+```
+
+We can observe several things:
+
+- Although the SOM has decided to "cut" the mammoth chest open in order to picture it nicely, it did not cut the ribs, just stretched them quite a bit.
+- There is apparently a lot of pressure for putting the legs to one side of the picture, which we might want to reduce.
+- Tusks are rendered pretty tiny; mostly because they are underrepresented in the dataset.
+
+Let's try to fix some of the problems:
+```{r}
+set.seed(1)
+mammoth[,3]<-mammoth[,3]*0.5 #pretend the mammoth is not that tall
+print(system.time(
+e <- EmbedSOM::EmbedSOM(mammoth, parallel=T,
+       map=EmbedSOM::SOM(mammoth, xdim=24, ydim=24, rlen=20, parallel=T, batch=T))
+)[3])
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, data=mammoth, red=1, green=2, blue=3, alpha=.1)
+```
+
+Almost good.
+
+# A flat T-rex eating a flat triceratops
+
+The breakfast scene is slightly overcrowded if embedded by plain SOMs:
+
+```{r}
+set.seed(1)
+print(system.time(
+e <- EmbedSOM::EmbedSOM(trex, parallel=T,
+       map=EmbedSOM::SOM(trex, xdim=32, ydim=32, rlen=20, parallel=T, batch=T))
+)[3])
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, data=trex, blue=3, alpha=.2)
+```
+
+SOM-less embedding (with random landmarks) alleviates this problem (we use UMAP from the `uwot` package to organize 1000 randomly chosen landmarks, and project the rest of the dataset there):
+
+```{r}
+set.seed(1)
+print(system.time(
+e <- EmbedSOM::EmbedSOM(trex, parallel=T,
+       map=EmbedSOM::RandomMap(trex, 1000, coordsFn=EmbedSOM::uwotCoords(min_dist=2)))
+)[3])
+par(mar=rep(0,4))
+EmbedSOM::PlotEmbed(e, data=trex, blue=3, alpha=.2)
+```
